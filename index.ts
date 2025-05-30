@@ -1,40 +1,15 @@
 import express from "express";
-import { Pool } from "pg";
 import cors from "cors";
 import dotenv from "dotenv";
+import { initDB, ContactService, Contact, ContactResponse } from "./db";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL,
-});
-
 app.use(cors());
 app.use(express.json());
-
-async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS Contact (
-        id SERIAL PRIMARY KEY,
-        phoneNumber VARCHAR(20),
-        email VARCHAR(255),
-        linkedId INTEGER REFERENCES Contact(id),
-        linkPrecedence VARCHAR(10) CHECK (linkPrecedence IN ('primary', 'secondary')) NOT NULL,
-        createdAt TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updatedAt TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        deletedAt TIMESTAMP WITH TIME ZONE
-      )
-    `);
-    console.log("Database table ready");
-  } catch (error) {
-    console.error("DB init error:", error);
-  }
-}
 
 initDB();
 
@@ -56,31 +31,20 @@ app.post("/identify", async (req, res) => {
         .json({ error: "Either email or phoneNumber required" });
     }
 
-    const existingQuery = `
-      SELECT * FROM Contact 
-      WHERE deletedAt IS NULL 
-      AND (email = $1 OR phoneNumber = $2)
-      ORDER BY createdAt ASC
-    `;
+    const existing = await ContactService.findExistingContacts(
+      email,
+      phoneNumber
+    );
 
-    const existing = await pool.query(existingQuery, [
-      email || null,
-      phoneNumber || null,
-    ]);
-
-    if (existing.rows.length === 0) {
-      const newContact = await pool.query(
-        `
-        INSERT INTO Contact (phoneNumber, email, linkPrecedence)
-        VALUES ($1, $2, 'primary')
-        RETURNING *
-      `,
-        [phoneNumber || null, email || null]
+    if (existing.length === 0) {
+      const newContact = await ContactService.createPrimaryContact(
+        phoneNumber,
+        email
       );
 
       return res.json({
         contact: {
-          primaryContactId: newContact.rows[0].id,
+          primaryContactId: newContact.id,
           emails: email ? [email] : [],
           phoneNumbers: phoneNumber ? [phoneNumber] : [],
           secondaryContactIds: [],
@@ -88,50 +52,24 @@ app.post("/identify", async (req, res) => {
       });
     }
 
-    let allRelatedIds = new Set();
-    for (let contact of existing.rows) {
+    let allRelatedIds = new Set<number>();
+    for (let contact of existing) {
       let primaryId = contact.linkedid || contact.id;
       allRelatedIds.add(primaryId);
 
-      const secondaries = await pool.query(
-        `
-        SELECT * FROM Contact 
-        WHERE linkedId = $1 AND deletedAt IS NULL
-      `,
-        [primaryId]
-      );
-
-      secondaries.rows.forEach((sec) => allRelatedIds.add(sec.id));
+      const secondaries = await ContactService.findSecondaryContacts(primaryId);
+      secondaries.forEach((sec) => allRelatedIds.add(sec.id));
     }
 
-    const allRelated = await pool.query(
-      `
-      SELECT * FROM Contact 
-      WHERE id = ANY($1) AND deletedAt IS NULL
-      ORDER BY createdAt ASC
-    `,
-      [Array.from(allRelatedIds)]
+    const allRelated = await ContactService.findAllRelatedContacts(
+      Array.from(allRelatedIds)
     );
 
-    const allMatchingContacts = await pool.query(
-      `
-      SELECT DISTINCT c.* FROM Contact c
-      WHERE c.deletedAt IS NULL 
-      AND (c.email = $1 OR c.phoneNumber = $2 
-           OR c.id IN (
-             SELECT linkedId FROM Contact 
-             WHERE deletedAt IS NULL AND (email = $1 OR phoneNumber = $2)
-           )
-           OR c.linkedId IN (
-             SELECT id FROM Contact 
-             WHERE deletedAt IS NULL AND (email = $1 OR phoneNumber = $2)
-           ))
-      ORDER BY createdAt ASC
-    `,
-      [email || null, phoneNumber || null]
+    const allMatchingContacts = await ContactService.findAllMatchingContacts(
+      email,
+      phoneNumber
     );
-
-    const finalContacts = allMatchingContacts.rows;
+    const finalContacts = allMatchingContacts;
 
     const exactMatch = finalContacts.find(
       (c) =>
@@ -150,34 +88,27 @@ app.post("/identify", async (req, res) => {
           finalContacts.find((c) => c.linkprecedence === "primary") ||
           finalContacts[0];
 
-        const newSecondary = await pool.query(
-          `
-          INSERT INTO Contact (phoneNumber, email, linkedId, linkPrecedence)
-          VALUES ($1, $2, $3, 'secondary')
-          RETURNING *
-        `,
-          [phoneNumber || null, email || null, primary.id]
+        const newSecondary = await ContactService.createSecondaryContact(
+          phoneNumber,
+          email,
+          primary.id
         );
 
-        finalContacts.push(newSecondary.rows[0]);
+        finalContacts.push(newSecondary);
       }
     }
 
     const primaries = finalContacts.filter(
       (c) => c.linkprecedence === "primary"
     );
-    if (primaries.length > 1) {
-      const oldestPrimary = primaries[0]; 
-      for (let i = 1; i < primaries.length; i++) {
-        await pool.query(
-          `
-          UPDATE Contact 
-          SET linkedId = $1, linkPrecedence = 'secondary', updatedAt = CURRENT_TIMESTAMP
-          WHERE id = $2
-        `,
-          [oldestPrimary.id, primaries[i].id]
-        );
 
+    if (primaries.length > 1) {
+      const oldestPrimary = primaries[0];
+      for (let i = 1; i < primaries.length; i++) {
+        await ContactService.updateContactToSecondary(
+          primaries[i].id,
+          oldestPrimary.id
+        );
         primaries[i].linkedid = oldestPrimary.id;
         primaries[i].linkprecedence = "secondary";
       }
@@ -221,3 +152,4 @@ app.post("/identify", async (req, res) => {
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
+
