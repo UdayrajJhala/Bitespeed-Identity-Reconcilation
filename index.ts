@@ -153,3 +153,17 @@ app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
 
+function keepAlive() {
+  const url = 'https://bitespeed-identity-reconcilation-2x9v.onrender.com/health';
+  
+  fetch(url)
+    .then(response => console.log(`server alive`))
+    .catch(error => console.error('self ping failed', error.message));
+}
+
+
+setTimeout(() => {
+  keepAlive();
+  setInterval(keepAlive, 5 * 60 * 1000);
+}, 5 * 60 * 1000);
+
