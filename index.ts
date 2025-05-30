@@ -84,14 +84,109 @@ app.post("/identify", async (req, res) => {
       });
     }
 
+    let allRelatedIds = new Set();
+    for (let contact of existing.rows) {
+      let primaryId = contact.linkedid || contact.id;
+      allRelatedIds.add(primaryId);
 
-    const contact = existing.rows[0];
+      const secondaries = await pool.query(
+        `
+        SELECT * FROM Contact 
+        WHERE linkedId = $1 AND deletedAt IS NULL
+      `,
+        [primaryId]
+      );
+
+      secondaries.rows.forEach((sec) => allRelatedIds.add(sec.id));
+    }
+
+    const allRelated = await pool.query(
+      `
+      SELECT * FROM Contact 
+      WHERE id = ANY($1) AND deletedAt IS NULL
+      ORDER BY createdAt ASC
+    `,
+      [Array.from(allRelatedIds)]
+    );
+
+    const exactMatch = allRelated.rows.find(
+      (c) =>
+        c.email === (email || null) && c.phonenumber === (phoneNumber || null)
+    );
+
+    if (!exactMatch) {
+      const hasNewEmail =
+        email && !allRelated.rows.some((c) => c.email === email);
+      const hasNewPhone =
+        phoneNumber &&
+        !allRelated.rows.some((c) => c.phonenumber === phoneNumber);
+
+      if (hasNewEmail || hasNewPhone) {
+        const primary =
+          allRelated.rows.find((c) => c.linkprecedence === "primary") ||
+          allRelated.rows[0];
+
+        const newSecondary = await pool.query(
+          `
+          INSERT INTO Contact (phoneNumber, email, linkedId, linkPrecedence)
+          VALUES ($1, $2, $3, 'secondary')
+          RETURNING *
+        `,
+          [phoneNumber || null, email || null, primary.id]
+        );
+
+        allRelated.rows.push(newSecondary.rows[0]);
+      }
+    }
+
+    const primaries = allRelated.rows.filter(
+      (c) => c.linkprecedence === "primary"
+    );
+    if (primaries.length > 1) {
+      const oldestPrimary = primaries[0]; 
+
+      for (let i = 1; i < primaries.length; i++) {
+        await pool.query(
+          `
+          UPDATE Contact 
+          SET linkedId = $1, linkPrecedence = 'secondary', updatedAt = CURRENT_TIMESTAMP
+          WHERE id = $2
+        `,
+          [oldestPrimary.id, primaries[i].id]
+        );
+
+        primaries[i].linkedid = oldestPrimary.id;
+        primaries[i].linkprecedence = "secondary";
+      }
+    }
+
+    const primary =
+      allRelated.rows.find((c) => c.linkprecedence === "primary") ||
+      allRelated.rows[0];
+    const secondaries = allRelated.rows.filter((c) => c.id !== primary.id);
+
+    const emails = [
+      ...new Set(allRelated.rows.map((c) => c.email).filter(Boolean)),
+    ];
+    const phoneNumbers = [
+      ...new Set(allRelated.rows.map((c) => c.phonenumber).filter(Boolean)),
+    ];
+
+    if (primary.email && emails.includes(primary.email)) {
+      emails.splice(emails.indexOf(primary.email), 1);
+      emails.unshift(primary.email);
+    }
+    if (primary.phonenumber && phoneNumbers.includes(primary.phonenumber)) {
+      phoneNumbers.splice(phoneNumbers.indexOf(primary.phonenumber), 1);
+      phoneNumbers.unshift(primary.phonenumber);
+    }
+
     res.json({
       contact: {
-        primaryContactId: contact.id,
-        emails: contact.email ? [contact.email] : [],
-        phoneNumbers: contact.phonenumber ? [contact.phonenumber] : [],
-        secondaryContactIds: [],
+        primaryContactId: primary.id,
+        emails: emails,
+        phoneNumbers: phoneNumbers,
+        secondaryContactIds: secondaries.map((c) => c.id),
       },
     });
   } catch (error) {
