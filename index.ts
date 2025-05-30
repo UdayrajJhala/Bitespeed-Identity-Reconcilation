@@ -42,6 +42,10 @@ app.get("/", (req, res) => {
   res.json({ message: "Bitespeed Identity Service Running" });
 });
 
+app.get("/health", (req, res) => {
+  res.json({ status: "OK", timestamp: new Date().toISOString() });
+});
+
 app.post("/identify", async (req, res) => {
   try {
     const { email, phoneNumber } = req.body;
@@ -109,22 +113,42 @@ app.post("/identify", async (req, res) => {
       [Array.from(allRelatedIds)]
     );
 
-    const exactMatch = allRelated.rows.find(
+    const allMatchingContacts = await pool.query(
+      `
+      SELECT DISTINCT c.* FROM Contact c
+      WHERE c.deletedAt IS NULL 
+      AND (c.email = $1 OR c.phoneNumber = $2 
+           OR c.id IN (
+             SELECT linkedId FROM Contact 
+             WHERE deletedAt IS NULL AND (email = $1 OR phoneNumber = $2)
+           )
+           OR c.linkedId IN (
+             SELECT id FROM Contact 
+             WHERE deletedAt IS NULL AND (email = $1 OR phoneNumber = $2)
+           ))
+      ORDER BY createdAt ASC
+    `,
+      [email || null, phoneNumber || null]
+    );
+
+    const finalContacts = allMatchingContacts.rows;
+
+    const exactMatch = finalContacts.find(
       (c) =>
         c.email === (email || null) && c.phonenumber === (phoneNumber || null)
     );
 
     if (!exactMatch) {
       const hasNewEmail =
-        email && !allRelated.rows.some((c) => c.email === email);
+        email && !finalContacts.some((c) => c.email === email);
       const hasNewPhone =
         phoneNumber &&
-        !allRelated.rows.some((c) => c.phonenumber === phoneNumber);
+        !finalContacts.some((c) => c.phonenumber === phoneNumber);
 
       if (hasNewEmail || hasNewPhone) {
         const primary =
-          allRelated.rows.find((c) => c.linkprecedence === "primary") ||
-          allRelated.rows[0];
+          finalContacts.find((c) => c.linkprecedence === "primary") ||
+          finalContacts[0];
 
         const newSecondary = await pool.query(
           `
@@ -135,16 +159,15 @@ app.post("/identify", async (req, res) => {
           [phoneNumber || null, email || null, primary.id]
         );
 
-        allRelated.rows.push(newSecondary.rows[0]);
+        finalContacts.push(newSecondary.rows[0]);
       }
     }
 
-    const primaries = allRelated.rows.filter(
+    const primaries = finalContacts.filter(
       (c) => c.linkprecedence === "primary"
     );
     if (primaries.length > 1) {
       const oldestPrimary = primaries[0]; 
-
       for (let i = 1; i < primaries.length; i++) {
         await pool.query(
           `
@@ -161,15 +184,15 @@ app.post("/identify", async (req, res) => {
     }
 
     const primary =
-      allRelated.rows.find((c) => c.linkprecedence === "primary") ||
-      allRelated.rows[0];
-    const secondaries = allRelated.rows.filter((c) => c.id !== primary.id);
+      finalContacts.find((c) => c.linkprecedence === "primary") ||
+      finalContacts[0];
+    const secondaries = finalContacts.filter((c) => c.id !== primary.id);
 
     const emails = [
-      ...new Set(allRelated.rows.map((c) => c.email).filter(Boolean)),
+      ...new Set(finalContacts.map((c) => c.email).filter(Boolean)),
     ];
     const phoneNumbers = [
-      ...new Set(allRelated.rows.map((c) => c.phonenumber).filter(Boolean)),
+      ...new Set(finalContacts.map((c) => c.phonenumber).filter(Boolean)),
     ];
 
     if (primary.email && emails.includes(primary.email)) {
