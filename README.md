@@ -54,4 +54,5 @@ Response:
 - Links contacts that share email or phone number
 - Creates secondary contacts for new information
 - Merges separate primary contacts when they're linked by new data
+- Self pings the health checkpoint every 5 minutes to keep the render service alive
 
