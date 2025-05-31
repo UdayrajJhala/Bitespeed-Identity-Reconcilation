@@ -2,7 +2,7 @@
 
 Identity reconciliation service that links customer contacts across multiple purchases.
 
-Live endpoint: `https://bitespeed-identity-reconcilation-2x9v.onrender.com`
+Live endpoint: https://bitespeed-identity-reconcilation-2x9v.onrender.com
 
 ## Setup
 
